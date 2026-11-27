@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BallPhysics, TrackSegment, ObstacleData, BoosterData, GameSettings } from './types';
-import { BALL_RADIUS } from './physics';
+import { BALL_RADIUS, platformTopAt, obstacleXAt } from './physics';
 
 export interface GameEngineCallbacks {
   onScoreUpdate: (score: number) => void;
@@ -165,7 +165,7 @@ export class GameEngine {
 
   // Track rendering
   private trackGroup: THREE.Group;
-  private activeSegmentMeshes: Map<string, THREE.Group> = new Map();
+  private activeSegmentMeshes: Map<TrackSegment, THREE.Group> = new Map();
 
   // Background Scenery (Cyber Skyscrapers)
   private sceneryGroup: THREE.Group;
@@ -436,28 +436,31 @@ export class GameEngine {
    * Synchronizes track segments with 3D meshes
    */
   public syncTrackSegments(segments: TrackSegment[]) {
-    const activeIds = new Set(segments.map((s) => s.id));
+    const activeSegments = new Set(segments);
 
     // 1. Remove meshes for segments that were recycled
-    for (const [id, group] of this.activeSegmentMeshes.entries()) {
-      if (!activeIds.has(id)) {
+    for (const [segment, group] of this.activeSegmentMeshes.entries()) {
+      if (!activeSegments.has(segment)) {
         this.trackGroup.remove(group);
         // Dispose geometries in group
         group.traverse((obj) => {
-          if (obj instanceof THREE.Mesh) {
+          if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
             obj.geometry.dispose();
           }
+          if (obj instanceof THREE.Line && obj.material instanceof THREE.LineBasicMaterial && obj.material !== this.edgeGlowMaterial) {
+            obj.material.dispose();
+          }
         });
-        this.activeSegmentMeshes.delete(id);
+        this.activeSegmentMeshes.delete(segment);
       }
     }
 
     // 2. Create meshes for newly added segments
     for (const seg of segments) {
-      if (!this.activeSegmentMeshes.has(seg.id)) {
+      if (!this.activeSegmentMeshes.has(seg)) {
         const segGroup = this.createSegmentMesh(seg);
         this.trackGroup.add(segGroup);
-        this.activeSegmentMeshes.set(seg.id, segGroup);
+        this.activeSegmentMeshes.set(seg, segGroup);
       }
     }
   }
@@ -468,6 +471,15 @@ export class GameEngine {
 
     // Main platform box
     const platGeo = new THREE.BoxGeometry(seg.width, seg.height, seg.length);
+    if (seg.rampAngle) {
+      const vertices = platGeo.attributes.position;
+      for (let i = 0; i < vertices.count; i++) {
+        const worldZ = seg.z + vertices.getZ(i);
+        const rise = platformTopAt(seg, worldZ) - seg.y - seg.height / 2;
+        vertices.setY(i, vertices.getY(i) + rise);
+      }
+      platGeo.computeVertexNormals();
+    }
     const platMesh = new THREE.Mesh(platGeo, this.platformMaterial);
     group.add(platMesh);
 
@@ -476,21 +488,12 @@ export class GameEngine {
     const edgeLines = new THREE.LineSegments(topEdges, this.edgeGlowMaterial);
     group.add(edgeLines);
 
-    // Ramp surface if segment has ramp
-    if (seg.hasRamp && seg.rampAngle) {
-      const rampGeo = new THREE.BoxGeometry(seg.width, seg.height, seg.length);
-      const rampMesh = new THREE.Mesh(rampGeo, this.platformMaterial);
-      rampMesh.rotation.x = -seg.rampAngle;
-      rampMesh.position.y = (Math.tan(seg.rampAngle) * seg.length) / 4;
-      group.add(rampMesh);
-    }
-
     // Boosters
     for (const b of seg.boosters) {
-      const bGeo = new THREE.PlaneGeometry(b.width, b.depth);
+      const bGeo = new THREE.PlaneGeometry(b.width, b.depth / Math.cos(seg.rampAngle ?? 0));
       const bMesh = new THREE.Mesh(bGeo, this.boosterMaterial);
-      bMesh.rotation.x = -Math.PI / 2;
-      bMesh.position.set(b.x - seg.x, seg.height / 2 + 0.02, b.z - seg.z);
+      bMesh.rotation.x = -Math.PI / 2 - (seg.rampAngle ?? 0);
+      bMesh.position.set(b.x - seg.x, platformTopAt(seg, b.z) - seg.y + 0.02, b.z - seg.z);
       group.add(bMesh);
     }
 
@@ -541,19 +544,16 @@ export class GameEngine {
   /**
    * Updates moving obstacles positions inside Three.js
    */
-  public updateDynamicObstacles(segments: TrackSegment[]) {
+  public updateDynamicObstacles(segments: TrackSegment[], time: number) {
     for (const seg of segments) {
-      const group = this.activeSegmentMeshes.get(seg.id);
+      const group = this.activeSegmentMeshes.get(seg);
       if (!group) continue;
 
       for (const obs of seg.obstacles) {
         if (obs.type === 'moving_horizontal' && obs.speed !== undefined && obs.phase !== undefined) {
           const obsMesh = group.getObjectByName(obs.id);
           if (obsMesh) {
-            const t = Date.now() / 1000 * obs.speed + obs.phase;
-            const pingPong = Math.sin(t);
-            const currentX = obs.x + pingPong * ((obs.maxX - obs.minX) / 2);
-            obsMesh.position.x = currentX - seg.x;
+            obsMesh.position.x = obstacleXAt(obs, time) - seg.x;
           }
         }
       }
@@ -607,14 +607,14 @@ export class GameEngine {
    * Smooth camera tracking with subtle dynamic lean and FOV kick.
    * Keeps ball placed comfortably in the lower third of screen.
    */
-  public updateCamera(ball: BallPhysics, dt: number) {
+  public updateCamera(ball: BallPhysics, dt: number, snap = false) {
     const targetX = ball.x * 0.65;
     const targetY = ball.y + 2.7;
     const targetZ = ball.z - 6.4;
 
     // Frame-rate independent exponential damping
     const lambda = 12.0;
-    const factor = 1 - Math.exp(-lambda * dt);
+    const factor = snap ? 1 : 1 - Math.exp(-lambda * dt);
 
     this.camera.position.x += (targetX - this.camera.position.x) * factor;
     this.camera.position.y += (targetY - this.camera.position.y) * factor;

@@ -1,5 +1,5 @@
 import { TrackSegment, ObstacleData, BoosterData, GameMode } from './types';
-import { NORMAL_PHYSICS, HARD_PHYSICS, calculateJumpReach } from './physics';
+import { NORMAL_PHYSICS, HARD_PHYSICS, calculateJumpReach, rampLaunchSpeed, PLATFORM_HEIGHT } from './physics';
 
 export interface GeneratorState {
   nextZ: number;
@@ -38,16 +38,17 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   // Safe starting stretch (first 70 meters)
   if (distance < 70) {
     const length = 40;
+    const behindStart = distance === 0 ? 10 : 0;
     const width = isHard ? 10 : 12;
     const seg: TrackSegment = {
       id: segmentId,
       type: 'straight',
       x: state.currentX,
       y: state.currentY,
-      z: state.nextZ + length / 2,
+      z: state.nextZ + (length - behindStart) / 2,
       width,
-      length,
-      height: 1.2,
+      length: length + behindStart,
+      height: PLATFORM_HEIGHT,
       obstacles: [],
       boosters: [],
     };
@@ -131,7 +132,6 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
       width: segWidth * 0.6,
       depth: 6,
       boostFactor: 1.35,
-      jumpImpulse: 7.5,
     });
   } else if (segType === 'tunnel') {
     hasTunnel = true;
@@ -236,7 +236,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
     z: state.nextZ + segLength / 2,
     width: segWidth,
     length: segLength,
-    height: 1.2,
+    height: PLATFORM_HEIGHT,
     hasRamp,
     rampAngle: hasRamp ? rampAngle : undefined,
     obstacles,
@@ -250,8 +250,8 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   // If this was a ramp, follow it with a gap and safe landing platform
   if (hasRamp) {
     // Calculate guaranteed reachable gap length
-    const launchSpeed = currentSpeed * 1.35;
-    const launchVy = 7.5;
+    const launchSpeed = currentSpeed;
+    const launchVy = rampLaunchSpeed(launchSpeed, rampAngle);
     const rampRise = Math.tan(rampAngle) * segLength;
     const maxJumpReach = calculateJumpReach(launchSpeed, launchVy, rampRise);
     // Fair, guaranteed gap length well within reach
@@ -271,7 +271,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
       z: state.nextZ + landingLength / 2,
       width: landingWidth,
       length: landingLength,
-      height: 2.0, // Thicker platform so swept collision never misses
+      height: PLATFORM_HEIGHT,
       obstacles: [],
       boosters: [],
     };
@@ -291,10 +291,12 @@ export function populateTrack(
   playerZ: number,
   lookaheadDistance = 260
 ): TrackSegment[] {
-  let updated = [...segments];
-
-  // 1. Remove old segments that are far behind player
-  updated = updated.filter((seg) => seg.z + seg.length / 2 > playerZ - 45);
+  const oldest = segments[0];
+  const cutoff = playerZ - 45;
+  if (oldest && oldest.z + oldest.length / 2 > cutoff && state.nextZ >= playerZ + lookaheadDistance) {
+    return segments;
+  }
+  const updated = segments.filter(seg => seg.z + seg.length / 2 > cutoff);
 
   // 2. Generate new segments while track extent is less than playerZ + lookaheadDistance
   while (state.nextZ < playerZ + lookaheadDistance) {
