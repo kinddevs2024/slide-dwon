@@ -306,7 +306,7 @@ export default function App() {
         }
 
         // Update score while alive and on valid forward progress
-        if (ballRef.current.alive && ballRef.current.y > -5) {
+        if (ballRef.current.alive && ballRef.current.grounded) {
           const newScore = Math.max(scoreRef.current, Math.floor(ballRef.current.z));
           scoreRef.current = newScore;
         }

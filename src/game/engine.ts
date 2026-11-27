@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { BallPhysics, TrackSegment, ObstacleData, BoosterData, GameSettings } from './types';
-import { BALL_RADIUS, platformTopAt, obstacleXAt } from './physics';
+import { BALL_RADIUS, platformTopAt, obstacleXAt, downhillHeight, DOWNHILL_GRADE } from './physics';
 
 export interface GameEngineCallbacks {
   onScoreUpdate: (score: number) => void;
@@ -23,7 +23,7 @@ function createNeonGridTexture(): THREE.CanvasTexture {
   ctx.fillRect(0, 0, 256, 256);
 
   // Subtle interior grid
-  ctx.strokeStyle = 'rgba(0, 255, 140, 0.18)';
+  ctx.strokeStyle = 'rgba(0, 255, 140, 0.32)';
   ctx.lineWidth = 2;
   const step = 32;
   for (let x = 0; x <= 256; x += step) {
@@ -236,8 +236,8 @@ export class GameEngine {
 
     // 3. Scene & Fog (linear fog for clear visibility of upcoming track)
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x06020c);
-    this.scene.fog = new THREE.Fog(0x06020c, 50, 360);
+    this.scene.background = new THREE.Color(0x171128);
+    this.scene.fog = new THREE.Fog(0x171128, 60, 340);
 
     // 4. Camera - 65deg FOV, positioned behind and slightly above
     this.camera = new THREE.PerspectiveCamera(65, width / height, 0.1, 800);
@@ -386,9 +386,19 @@ export class GameEngine {
    */
   private buildProceduralSkyscrapers() {
     const buildingGeo = new THREE.BoxGeometry(1, 1, 1);
-    const edgeGeo = new THREE.EdgesGeometry(buildingGeo);
+    // Level storeys in the skyline give the player a horizon reference on the slope.
+    const outline = new THREE.EdgesGeometry(buildingGeo);
+    const lines = Array.from(outline.attributes.position.array);
+    outline.dispose();
+    for (let floor = 1; floor < 14; floor++) {
+      const y = floor / 14 - 0.5;
+      lines.push(-0.5,y,-0.5, 0.5,y,-0.5, 0.5,y,-0.5, 0.5,y,0.5,
+                 0.5,y,0.5, -0.5,y,0.5, -0.5,y,0.5, -0.5,y,-0.5);
+    }
+    const edgeGeo = new THREE.BufferGeometry();
+    edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(lines, 3));
 
-    const darkBuildingMat = new THREE.MeshBasicMaterial({ color: 0x090514 });
+    const darkBuildingMat = new THREE.MeshBasicMaterial({ color: 0x15142b });
     const cyanLineMat = new THREE.LineBasicMaterial({ color: 0x00f3ff, transparent: true, opacity: 0.3 });
     const greenLineMat = new THREE.LineBasicMaterial({ color: 0x00ff88, transparent: true, opacity: 0.25 });
     const purpleLineMat = new THREE.LineBasicMaterial({ color: 0x9900ff, transparent: true, opacity: 0.2 });
@@ -414,7 +424,8 @@ export class GameEngine {
       const isLeft = Math.random() > 0.5;
       const x = isLeft ? -(24 + Math.random() * 45) : (24 + Math.random() * 45);
       const z = (i * 35) - 60;
-      const y = height / 2 - 20;
+      const rooftop = downhillHeight(z) + (Math.random() - 0.55) * 55;
+      const y = rooftop - height / 2;
 
       bGroup.position.set(x, y, z);
       this.sceneryGroup.add(bGroup);
@@ -426,9 +437,10 @@ export class GameEngine {
    */
   public updateScenery(playerZ: number) {
     this.sceneryGroup.children.forEach((child) => {
-      if (child.position.z < playerZ - 90) {
-        child.position.z += 48 * 35; // Loop forward
-      }
+      const span = this.sceneryGroup.children.length * 35;
+      const wraps = Math.floor((child.position.z - playerZ + 90) / span);
+      child.position.z -= wraps * span;
+      child.position.y -= downhillHeight(wraps * span);
     });
   }
 
@@ -471,7 +483,7 @@ export class GameEngine {
 
     // Main platform box
     const platGeo = new THREE.BoxGeometry(seg.width, seg.height, seg.length);
-    if (seg.rampAngle) {
+    if (seg.grade) {
       const vertices = platGeo.attributes.position;
       for (let i = 0; i < vertices.count; i++) {
         const worldZ = seg.z + vertices.getZ(i);
@@ -490,9 +502,9 @@ export class GameEngine {
 
     // Boosters
     for (const b of seg.boosters) {
-      const bGeo = new THREE.PlaneGeometry(b.width, b.depth / Math.cos(seg.rampAngle ?? 0));
+      const bGeo = new THREE.PlaneGeometry(b.width, b.depth / Math.cos(Math.atan(seg.grade ?? 0)));
       const bMesh = new THREE.Mesh(bGeo, this.boosterMaterial);
-      bMesh.rotation.x = -Math.PI / 2 - (seg.rampAngle ?? 0);
+      bMesh.rotation.x = -Math.PI / 2 - (Math.atan(seg.grade ?? 0));
       bMesh.position.set(b.x - seg.x, platformTopAt(seg, b.z) - seg.y + 0.02, b.z - seg.z);
       group.add(bMesh);
     }
@@ -525,12 +537,13 @@ export class GameEngine {
 
       for (let i = 0; i < archCount; i++) {
         const archZ = -seg.length / 2 + i * archSpacing + archSpacing / 2;
+        const deckY = platformTopAt(seg, seg.z + archZ) - seg.y;
         // Inverted U shape arch
         const points = [
-          new THREE.Vector3(-seg.width / 2, seg.height / 2, archZ),
-          new THREE.Vector3(-seg.width / 2, seg.height / 2 + 5.5, archZ),
-          new THREE.Vector3(seg.width / 2, seg.height / 2 + 5.5, archZ),
-          new THREE.Vector3(seg.width / 2, seg.height / 2, archZ),
+          new THREE.Vector3(-seg.width / 2, deckY, archZ),
+          new THREE.Vector3(-seg.width / 2, deckY + 5.5, archZ),
+          new THREE.Vector3(seg.width / 2, deckY + 5.5, archZ),
+          new THREE.Vector3(seg.width / 2, deckY, archZ),
         ];
         const archGeo = new THREE.BufferGeometry().setFromPoints(points);
         const archLine = new THREE.Line(archGeo, tunnelMat);
@@ -583,6 +596,7 @@ export class GameEngine {
     // Contact shadow
     if (ball.grounded) {
       this.contactShadow.visible = true;
+      this.contactShadow.rotation.x = -Math.PI / 2 - Math.atan(DOWNHILL_GRADE);
       this.contactShadow.position.set(ball.x, ball.y - ball.radius + 0.03, ball.z);
     } else {
       this.contactShadow.visible = false;
@@ -609,7 +623,7 @@ export class GameEngine {
    */
   public updateCamera(ball: BallPhysics, dt: number, snap = false) {
     const targetX = ball.x * 0.65;
-    const targetY = ball.y + 2.7;
+    const targetY = ball.y + 4.2;
     const targetZ = ball.z - 6.4;
 
     // Frame-rate independent exponential damping
@@ -622,7 +636,7 @@ export class GameEngine {
 
     // Look forward down the track: slightly higher to anchor ball in lower 35% of screen
     const lookAtX = ball.x * 0.35;
-    const lookAtY = ball.y + 1.8;
+    const lookAtY = ball.y + 2 + downhillHeight(24);
     const lookAtZ = ball.z + 24.0;
 
     // Dynamic roll tilt on steering using camera.up vector (never mutate rotation.z after lookAt!)
@@ -631,7 +645,7 @@ export class GameEngine {
     this.camera.lookAt(lookAtX, lookAtY, lookAtZ);
 
     // Dynamic FOV kick on speed boost
-    const targetFov = ball.boostTimer > 0 ? 73 : 65;
+    const targetFov = 65 + THREE.MathUtils.clamp((ball.vz - 24) * 0.24, 0, 12);
     this.camera.fov += (targetFov - this.camera.fov) * factor;
     this.camera.updateProjectionMatrix();
   }

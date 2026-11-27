@@ -4,7 +4,7 @@ import {
   checkSphereAABBCollision,
   createInitialBallState,
   stepBallPhysics,
-  calculateJumpReach,
+  downhillHeight,
   NORMAL_PHYSICS,
   HARD_PHYSICS,
   BALL_RADIUS,
@@ -136,12 +136,23 @@ test('Ball rolls off edge into void if steered too far sideways (no invisible wa
   assert.ok(current.vy < 0, 'Ball is in free fall with downward velocity');
 });
 
-test('calculateJumpReach calculates ballistic clearance properly', () => {
-  // Speed 30 m/s, launch angle vy = 8 m/s, drop height = 2m
-  const reach = calculateJumpReach(30, 8, 2);
-  assert.ok(reach > 20, 'Jump reaches at least 20 meters with boost and ramp');
+test('Every generated roof descends, including the transition across gaps', () => {
+  for (const mode of ['normal', 'hard'] as const) {
+    const state = createInitialGeneratorState(mode, 37);
+    let previousEnd = Infinity;
+    for (let i = 0; i < 500; i++) {
+      for (const seg of generateNextSegments(state)) {
+        const start = seg.z - seg.length / 2;
+        const end = seg.z + seg.length / 2;
+        const entry = platformTopAt(seg, start);
+        assert.ok(entry <= previousEnd + 1e-7);
+        previousEnd = platformTopAt(seg, end);
+        assert.ok(previousEnd < entry);
+        assert.ok(Math.abs(previousEnd - downhillHeight(end) - seg.height / 2) < 1e-7);
+      }
+    }
+  }
 });
-
 
 test('Both modes keep the ball supported across the starting runway and first seam', () => {
   for (const mode of ['normal', 'hard'] as const) {
@@ -151,7 +162,9 @@ test('Both modes keep the ball supported across the starting runway and first se
       let ball = createInitialBallState();
       ball.vz = params.baseSpeed;
       while (ball.z < 78) {
+        const previous = ball;
         ball = stepBallPhysics(ball, 0, 1, params, segments, dt).ball;
+        assert.ok(ball.y < previous.y && ball.vz > previous.vz);
         assert.ok(ball.alive && ball.grounded);
         const support = segments.find(seg => seg.id === ball.onPlatformId)!;
         assert.ok(Math.abs(ball.y - ball.radius - platformTopAt(support, ball.z)) < 1e-6);
@@ -160,7 +173,7 @@ test('Both modes keep the ball supported across the starting runway and first se
   }
 });
 
-test('Ramps launch at the lip and reach the landing with or without the speed pad', () => {
+test('The ball descends through each gap and lands with or without a boost', () => {
   for (const mode of ['normal', 'hard'] as const) {
     const state = createInitialGeneratorState(mode, 95);
     let sections: TrackSegment[];
@@ -173,11 +186,14 @@ test('Ramps launch at the lip and reach the landing with or without the speed pa
         let ball = createInitialBallState();
         ball.x = ramp.x + offset;
         ball.z = ramp.z - ramp.length / 2;
+        ball.y = platformTopAt(ramp, ball.z) + ball.radius;
         ball.vz = params.baseSpeed;
         let launches = 0;
         while (ball.alive && ball.z < landing.z + landing.length / 2) {
+          const previousY = ball.y;
           const step = stepBallPhysics(ball, 0, 1, params, sections, dt);
           ball = step.ball;
+          assert.ok(ball.y < previousY);
           if (step.jumpTriggered) {
             launches++;
             assert.ok(ball.z >= lip);
@@ -200,4 +216,29 @@ test('A ball below the deck cannot snap onto the track from underneath', () => {
   ball.grounded = false;
   const step = stepBallPhysics(ball, 0, 1, NORMAL_PHYSICS, segments, 0.05);
   assert.ok(!step.ball.grounded && step.ball.y < ball.y);
+});
+
+test('A long descent accelerates without pads and survives far below the start', () => {
+  for (const mode of ['normal', 'hard'] as const) {
+    const params = mode === 'normal' ? NORMAL_PHYSICS : HARD_PHYSICS;
+    const [roof] = generateNextSegments(createInitialGeneratorState(mode, 41));
+    roof.length = 4000;
+    roof.z = roof.length / 2;
+    roof.y = 0;
+    roof.boosters = [];
+    let ball = createInitialBallState();
+    ball.vz = params.baseSpeed;
+    while (ball.z < 1000) {
+      const prev = ball;
+      ball = stepBallPhysics(ball, 0, 1, params, [roof], 1 / 60).ball;
+      assert.ok(ball.alive && ball.grounded && ball.vz > prev.vz && ball.vz <= params.maxSpeed);
+      assert.ok(ball.y < prev.y);
+      if (ball.z >= 30) assert.ok(ball.vz > params.baseSpeed + 3);
+    }
+    assert.ok(ball.y < -300);
+    for (let i = 0; i < 180 && ball.alive; i++) {
+      ball = stepBallPhysics(ball, 1, 1, params, [], 1 / 60).ball;
+    }
+    assert.equal(ball.causeOfDeath, 'fall');
+  }
 });

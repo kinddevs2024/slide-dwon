@@ -2,6 +2,8 @@ import React from 'react';
 import { GameMode } from '../game/types';
 import { Volume2, VolumeX, ArrowLeft } from 'lucide-react';
 
+import { HARD_PHYSICS, NORMAL_PHYSICS } from '../game/physics';
+
 interface HUDProps {
   score: number;
   bestScore: number;
@@ -23,6 +25,7 @@ export const HUD: React.FC<HUDProps> = ({
   onToggleSound,
   onQuitToMenu,
 }) => {
+  const speedLimit = mode === 'hard' ? HARD_PHYSICS.maxSpeed : NORMAL_PHYSICS.maxSpeed;
   const isNewBest = score > bestScore && bestScore > 0;
 
   return (
@@ -106,7 +109,7 @@ export const HUD: React.FC<HUDProps> = ({
             className={`h-full transition-all duration-100 ${
               boostActive ? 'bg-yellow-400 shadow-[0_0_8px_#ffe600]' : 'bg-[#00ff88]'
             }`}
-            style={{ width: `${Math.min(100, (speed / 50) * 100)}%` }}
+            style={{ width: `${Math.min(100, (speed / speedLimit) * 100)}%` }}
           />
         </div>
       </div>

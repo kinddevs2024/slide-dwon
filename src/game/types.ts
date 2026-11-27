@@ -69,7 +69,6 @@ export interface BoosterData {
   width: number;
   depth: number;
   boostFactor: number; // e.g. 1.4x speed
-  jumpImpulse?: number;
 }
 
 export interface TrackSegment {
@@ -81,9 +80,8 @@ export interface TrackSegment {
   width: number;
   length: number;
   height: number;
-  slopeAngle?: number; // radians pitching up/down
+  grade?: number; // change in world Y per metre of forward travel
   hasRamp?: boolean;
-  rampAngle?: number;
   obstacles: ObstacleData[];
   boosters: BoosterData[];
   hasTunnel?: boolean;
