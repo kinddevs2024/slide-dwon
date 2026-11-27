@@ -1,6 +1,6 @@
 {
   "name": "Slide Down - Cyber 3D Arcade",
-  "description": "High-speed 3D cyber arcade runner inspired by Slide Down. Steer the rolling sphere across infinite floating neon platforms, jump ramps, and dodging hazards.",
+  "description": "High-speed 3D cyber arcade runner inspired by Slide Down. Steer a speeding ball down endless neon rooftops, clear gaps and dodge obstacles.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

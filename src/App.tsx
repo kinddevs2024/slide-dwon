@@ -73,6 +73,8 @@ export default function App() {
   const settingsRef = useRef<GameSettings>(settings);
   const animFrameRef = useRef<number>(0);
   const lastTimeRef = useRef<number>(0);
+  const runTimeRef = useRef(0);
+  const gameOverTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const scoreRef = useRef<number>(0);
 
   // Keep refs in sync with state
@@ -126,8 +128,19 @@ export default function App() {
     updateInputFromKeys();
   }, [touchLeft, touchRight, updateInputFromKeys]);
 
+  const clearInput = useCallback(() => {
+    keysPressedRef.current.clear();
+    setTouchLeft(false);
+    setTouchRight(false);
+    inputAxisRef.current = 0;
+  }, []);
+
   // Start or restart a run
   const startGame = useCallback((mode: GameMode) => {
+    clearInput();
+    clearTimeout(gameOverTimer.current);
+    runTimeRef.current = 0;
+    gameStateRef.current = 'playing';
     setActiveMode(mode);
     activeModeRef.current = mode;
 
@@ -148,7 +161,7 @@ export default function App() {
     if (engineRef.current) {
       engineRef.current.syncTrackSegments(initialSegments);
       engineRef.current.updateBall(newBall, 0.016);
-      engineRef.current.updateCamera(newBall, 0.016);
+      engineRef.current.updateCamera(newBall, 0, true);
     }
 
     scoreRef.current = 0;
@@ -162,10 +175,13 @@ export default function App() {
     if (settingsRef.current.music) {
       audioManager.startMusic();
     }
-  }, []);
+  }, [clearInput]);
 
   // Return to Main Menu
   const quitToMenu = useCallback(() => {
+    clearInput();
+    clearTimeout(gameOverTimer.current);
+    gameStateRef.current = 'title';
     audioManager.stopAll();
     setGameState('title');
 
@@ -181,8 +197,9 @@ export default function App() {
 
     if (engineRef.current) {
       engineRef.current.syncTrackSegments(initialSegments);
+      engineRef.current.updateCamera(idleBall, 0, true);
     }
-  }, []);
+  }, [clearInput]);
 
   // Handle Game Over
   const handleGameOver = useCallback((cause: 'fall' | 'obstacle') => {
@@ -206,7 +223,7 @@ export default function App() {
 
     // Add entry to local records
     const updatedRecords = addRecord({
-      name: playerName,
+      name: loadPlayerName(),
       score: finalDistance,
       mode: currentMode,
       date: new Date().toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
@@ -214,10 +231,10 @@ export default function App() {
     setRecords(updatedRecords);
 
     // Brief delay for crash visual before showing modal
-    setTimeout(() => {
+    gameOverTimer.current = setTimeout(() => {
       setGameState('gameover');
     }, 450);
-  }, [playerName]);
+  }, []);
 
   // Main Animation & Physics Loop
   useEffect(() => {
@@ -243,7 +260,6 @@ export default function App() {
     lastTimeRef.current = performance.now();
     let lastHudUpdateTime = 0;
 
-    const isSoftware = engine.getIsSoftwareGl();
 
     const loop = (currentTime: number) => {
       const rawDt = (currentTime - lastTimeRef.current) / 1000;
@@ -258,6 +274,8 @@ export default function App() {
       if (currentGameState === 'playing') {
         const prevAlive = ballRef.current.alive;
 
+        if (prevAlive) runTimeRef.current += dt;
+
         // Step physics
         const stepResult = stepBallPhysics(
           ballRef.current,
@@ -265,7 +283,8 @@ export default function App() {
           settingsRef.current.sensitivity,
           physParams,
           trackSegmentsRef.current,
-          dt
+          dt,
+          runTimeRef.current
         );
 
         ballRef.current = stepResult.ball;
@@ -287,7 +306,7 @@ export default function App() {
         }
 
         // Update score while alive and on valid forward progress
-        if (ballRef.current.alive && ballRef.current.y > -5) {
+        if (ballRef.current.alive && ballRef.current.grounded) {
           const newScore = Math.max(scoreRef.current, Math.floor(ballRef.current.z));
           scoreRef.current = newScore;
         }
@@ -305,7 +324,7 @@ export default function App() {
         }
 
         // Dynamic obstacle animations in Three.js
-        engine.updateDynamicObstacles(trackSegmentsRef.current);
+        engine.updateDynamicObstacles(trackSegmentsRef.current, runTimeRef.current);
 
         // Update scenery skyscrapers
         engine.updateScenery(ballRef.current.z);
@@ -318,26 +337,10 @@ export default function App() {
           setBoostActive(ballRef.current.boostTimer > 0);
         }
       } else if (currentGameState === 'title') {
-        // In Title Menu: ball gently idles forward along track, sitting flush on top of surface
-        ballRef.current.z += 12 * dt;
-        ballRef.current.pitch += (12 * dt) / ballRef.current.radius;
-        ballRef.current.x = Math.sin(currentTime * 0.001) * 2.0;
+        // Keep the menu preview on the starting runway.
+        ballRef.current.pitch += 3 * dt;
+        ballRef.current.x = Math.sin(currentTime * 0.001) * 1.5;
         ballRef.current.y = INITIAL_BALL_Y;
-        ballRef.current.vy = 0;
-        ballRef.current.grounded = true;
-
-        // Populate track ahead in title
-        const updatedSegments = populateTrack(
-          trackSegmentsRef.current,
-          generatorStateRef.current,
-          ballRef.current.z,
-          180
-        );
-        if (updatedSegments !== trackSegmentsRef.current) {
-          trackSegmentsRef.current = updatedSegments;
-          engine.syncTrackSegments(updatedSegments);
-        }
-        engine.updateScenery(ballRef.current.z);
       }
 
       // Update 3D transforms & Camera
@@ -354,6 +357,7 @@ export default function App() {
     animFrameRef.current = requestAnimationFrame(loop);
 
     return () => {
+      clearTimeout(gameOverTimer.current);
       cancelAnimationFrame(animFrameRef.current);
       engine.dispose();
       audioManager.stopAll();
@@ -405,10 +409,7 @@ export default function App() {
       updateInputFromKeys();
     };
 
-    const handleBlur = () => {
-      keysPressedRef.current.clear();
-      updateInputFromKeys();
-    };
+    const handleBlur = clearInput;
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('keyup', handleKeyUp);
@@ -421,7 +422,7 @@ export default function App() {
       window.removeEventListener('blur', handleBlur);
       document.removeEventListener('visibilitychange', handleBlur);
     };
-  }, [updateInputFromKeys, showSettings, showLeaderboard, quitToMenu, startGame]);
+  }, [clearInput, updateInputFromKeys, showSettings, showLeaderboard, quitToMenu, startGame]);
 
   // Change player name handler
   const handlePlayerNameChange = (name: string) => {
@@ -471,9 +472,6 @@ export default function App() {
           />
           {/* Mobile on-screen touch controls */}
           <TouchControls
-            onSteer={(dir) => {
-              inputAxisRef.current = dir;
-            }}
             leftActive={touchLeft}
             rightActive={touchRight}
             setLeftActive={setTouchLeft}

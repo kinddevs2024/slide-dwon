@@ -1,16 +1,19 @@
-import { BallPhysics, TrackSegment, ObstacleData, BoosterData } from './types';
+import { BallPhysics, TrackSegment, ObstacleData } from './types';
 
 export const GRAVITY = 32; // m/s² for snappy responsive arcade physics
 export const BALL_RADIUS = 0.6;
 export const PLATFORM_HEIGHT = 1.2;
 export const PLATFORM_TOP_Y = PLATFORM_HEIGHT / 2; // 0.6
 export const INITIAL_BALL_Y = PLATFORM_TOP_Y + BALL_RADIUS; // 1.2
-export const FALL_KILL_Y = -22;
+// World Y falls by 32 cm for each metre of forward travel.
+export const DOWNHILL_GRADE = -0.32;
+export const downhillHeight = (z: number) => DOWNHILL_GRADE * z;
+const FALL_DEPTH = 22;
 
 export interface PhysicsParams {
   baseSpeed: number;
   maxSpeed: number;
-  speedRampRate: number; // speed increase per 100 meters
+  acceleration: number; // m/s² at the start of a run
   lateralSpeed: number;
   lateralAccel: number;
   lateralDamping: number;
@@ -19,8 +22,8 @@ export interface PhysicsParams {
 
 export const NORMAL_PHYSICS: PhysicsParams = {
   baseSpeed: 24,
-  maxSpeed: 42,
-  speedRampRate: 0.65,
+  maxSpeed: 64,
+  acceleration: 4.2,
   lateralSpeed: 14,
   lateralAccel: 28,
   lateralDamping: 0.82,
@@ -29,8 +32,8 @@ export const NORMAL_PHYSICS: PhysicsParams = {
 
 export const HARD_PHYSICS: PhysicsParams = {
   baseSpeed: 32,
-  maxSpeed: 54,
-  speedRampRate: 1.1,
+  maxSpeed: 76,
+  acceleration: 5.0,
   lateralSpeed: 17,
   lateralAccel: 34,
   lateralDamping: 0.84,
@@ -83,6 +86,17 @@ export function checkSphereAABBCollision(
   return dx * dx + dy * dy + dz * dz < radius * radius;
 }
 
+export function platformTopAt(seg: TrackSegment, z: number): number {
+  const along = Math.max(0, Math.min(seg.length, z - (seg.z - seg.length / 2)));
+  return seg.y + seg.height / 2 + along * (seg.grade ?? 0);
+}
+
+export function obstacleXAt(obs: ObstacleData, time: number): number {
+  if (obs.type !== 'moving_horizontal') return obs.x;
+  const phase = time * (obs.speed ?? 0) + (obs.phase ?? 0);
+  return obs.x + Math.sin(phase) * (obs.maxX - obs.minX) / 2;
+}
+
 export interface StepPhysicsResult {
   ball: BallPhysics;
   boostTriggered: boolean;
@@ -100,7 +114,8 @@ export function stepBallPhysics(
   sensitivity: number,
   params: PhysicsParams,
   segments: TrackSegment[],
-  dt: number
+  dt: number,
+  time = 0 // simulation time at the end of this frame, in seconds
 ): StepPhysicsResult {
   if (!currentBall.alive) {
     return {
@@ -122,21 +137,10 @@ export function stepBallPhysics(
   // Clamped dt
   const clampedDt = Math.min(dt, 0.05);
 
-  // Calculate forward target speed based on distance traveled and boost
-  const distance = Math.max(0, ball.z);
-  const rampedBaseSpeed = Math.min(
-    params.maxSpeed,
-    params.baseSpeed + (distance / 100) * params.speedRampRate
-  );
-
-  let targetForwardSpeed = rampedBaseSpeed;
-  if (ball.boostTimer > 0) {
-    targetForwardSpeed *= 1.35;
-    ball.boostTimer = Math.max(0, ball.boostTimer - clampedDt);
-  }
-
-  // Smoothly adjust forward velocity vz towards target speed
-  ball.vz += (targetForwardSpeed - ball.vz) * Math.min(1, clampedDt * 4);
+  // Keep gaining speed after a boost. The acceleration eases near the mode limit.
+  const rate = params.acceleration / (params.maxSpeed - params.baseSpeed);
+  ball.vz += (params.maxSpeed - ball.vz) * -Math.expm1(-rate * clampedDt);
+  ball.boostTimer = Math.max(0, ball.boostTimer - clampedDt);
 
   // Sub-stepping for collision stability: 3 sub-steps per frame
   const subSteps = 3;
@@ -145,7 +149,8 @@ export function stepBallPhysics(
   for (let s = 0; s < subSteps; s++) {
     // 1. Lateral steering logic
     const controlMultiplier = ball.grounded ? 1.0 : params.airControlFactor;
-    const targetVx = inputAxis * params.lateralSpeed * sensitivity * controlMultiplier;
+    // Looking along +Z, screen right points toward world -X.
+    const targetVx = -inputAxis * params.lateralSpeed * sensitivity * controlMultiplier;
 
     if (Math.abs(inputAxis) > 0.02) {
       // Accelerating in direction of input
@@ -157,6 +162,7 @@ export function stepBallPhysics(
       if (Math.abs(ball.vx) < 0.05) ball.vx = 0;
     }
 
+    const prevX = ball.x;
     const prevY = ball.y;
     const prevZ = ball.z;
 
@@ -175,94 +181,52 @@ export function stepBallPhysics(
     ball.roll -= (ball.vx * subDt) / ball.radius;
     ball.yaw = -ball.vx * 0.04; // subtle lean into turns
 
-    // 3. Platform surface detection with swept vertical collision
-    let foundGround = false;
-    let groundY = -999;
-    let groundSegmentId: string | null = null;
+    // Resolve the floor against the same footprint and slope used for drawing.
+    const wasGrounded = ball.grounded;
+    const previousSupport = ball.onPlatformId;
+    ball.grounded = false;
+    ball.onPlatformId = null;
 
-    // Check candidate platforms under the ball
     for (const seg of segments) {
-      const halfLength = seg.length / 2;
-      const minZ = seg.z - halfLength;
-      const maxZ = seg.z + halfLength;
+      const start = seg.z - seg.length / 2;
+      const end = seg.z + seg.length / 2;
 
-      // Generous Z overlap to prevent any seam gaps between segments
-      const zOverlap = 0.8;
-      if (ball.z >= minZ - zOverlap && ball.z <= maxZ + zOverlap) {
-        // Platform X boundaries
-        const halfWidth = seg.width / 2;
-        const minX = seg.x - halfWidth;
-        const maxX = seg.x + halfWidth;
-
-        // Check if ball is horizontally on the platform (plus slight tolerance)
-        if (ball.x >= minX - 0.05 && ball.x <= maxX + 0.05) {
-          // Surface height calculation
-          let surfaceY = seg.y + seg.height / 2;
-
-          // If segment is a ramp, compute slope height at this Z
-          if (seg.hasRamp && seg.rampAngle) {
-            const relZ = Math.max(0, Math.min(1, (ball.z - minZ) / seg.length));
-            const rampRise = Math.tan(seg.rampAngle) * (relZ * seg.length);
-            surfaceY += rampRise;
-          }
-
-          const prevBottom = prevY - ball.radius;
-          const currentBottom = ball.y - ball.radius;
-
-          // Continuous swept collision:
-          // 1) Ball was at or above surface and crossed down into/through surface
-          // 2) OR ball was grounded and riding slightly bumpy seams
-          // 3) OR ball is falling onto landing pad at high speed
-          const crossedSurface = (prevBottom >= surfaceY - 0.25 && currentBottom <= surfaceY + 0.35);
-          const ridingSurface = (ball.grounded && Math.abs(currentBottom - surfaceY) < 0.65);
-          const fallingOntoSurface = (ball.vy <= 0 && currentBottom <= surfaceY + 0.25 && currentBottom >= surfaceY - 3.5);
-
-          if ((crossedSurface || ridingSurface || fallingOntoSurface) && ball.vy <= 3.0) {
-            foundGround = true;
-            groundY = Math.max(groundY, surfaceY + ball.radius);
-            groundSegmentId = seg.id;
-
-            // Check ramp launch at the end of a ramp segment
-            if (seg.hasRamp && seg.rampAngle && (maxZ - ball.z) < 1.2) {
-              // Upward ballistic impulse launch
-              ball.vy = Math.max(ball.vy, ball.vz * Math.sin(seg.rampAngle) * 0.95 + 4.5);
-              foundGround = false;
-              jumpTriggered = true;
-            }
-
-            // Check boosters on this segment
-            for (const b of seg.boosters) {
-              const bMinZ = b.z - b.depth / 2 - 0.5;
-              const bMaxZ = b.z + b.depth / 2 + 0.5;
-              const bMinX = b.x - b.width / 2 - 0.2;
-              const bMaxX = b.x + b.width / 2 + 0.2;
-
-              if (ball.z >= bMinZ && ball.z <= bMaxZ && ball.x >= bMinX && ball.x <= bMaxX) {
-                ball.boostTimer = 2.4;
-                ball.vz = Math.max(ball.vz, rampedBaseSpeed * b.boostFactor);
-                if (b.jumpImpulse) {
-                  ball.vy = Math.max(ball.vy, b.jumpImpulse);
-                  foundGround = false;
-                  jumpTriggered = true;
-                }
-                boostTriggered = true;
-              }
-            }
-
-            break;
-          }
+      if (seg.hasRamp && previousSupport === seg.id && prevZ < end && ball.z >= end) {
+        const fraction = (end - prevZ) / (ball.z - prevZ);
+        const lipX = prevX + (ball.x - prevX) * fraction;
+        if (Math.abs(lipX - seg.x) <= seg.width / 2) {
+          // Carry across the gap on a shallower, still descending trajectory.
+          ball.vy = Math.min(0, ball.vz * (seg.grade ?? 0) + 5.5);
+          ball.y = platformTopAt(seg, end) + ball.radius + ball.vy * subDt * (1 - fraction);
+          jumpTriggered = true;
+          break;
         }
       }
-    }
 
-    if (foundGround) {
+      if (ball.z < start || ball.z >= end || Math.abs(ball.x - seg.x) > seg.width / 2) continue;
+      const top = platformTopAt(seg, ball.z);
+      const previousTop = platformTopAt(seg, prevZ);
+      const epsilon = 1e-6;
+      const grade = seg.grade ?? 0;
+      const seamTolerance = Math.abs(grade * (ball.z - prevZ)) + epsilon;
+      const followsDeck = wasGrounded && Math.abs(prevY - ball.radius - previousTop) <= seamTolerance;
+      const crossesDeck = prevY - ball.radius >= previousTop - epsilon && ball.y - ball.radius <= top + epsilon;
+      if (!followsDeck && !crossesDeck) continue;
+
+      ball.y = top + ball.radius;
+      ball.vy = grade * ball.vz;
       ball.grounded = true;
-      ball.y = groundY;
-      ball.vy = 0;
-      ball.onPlatformId = groundSegmentId;
-    } else {
-      ball.grounded = false;
-      ball.onPlatformId = null;
+      ball.onPlatformId = seg.id;
+
+      for (const pad of seg.boosters) {
+        if (Math.abs(ball.z - pad.z) > pad.depth / 2 || Math.abs(ball.x - pad.x) > pad.width / 2) continue;
+        if (ball.boostTimer === 0) {
+          ball.vz += (params.maxSpeed - ball.vz) * (pad.boostFactor - 1);
+          boostTriggered = true;
+        }
+        ball.boostTimer = 2.4;
+      }
+      break;
     }
 
     // 4. Obstacle collision detection
@@ -270,13 +234,7 @@ export function stepBallPhysics(
       if (Math.abs(seg.z - ball.z) > seg.length + 5) continue;
 
       for (const obs of seg.obstacles) {
-        // Calculate dynamic obstacle bounds if moving
-        let currentObsX = obs.x;
-        if (obs.type === 'moving_horizontal' && obs.speed !== undefined && obs.phase !== undefined) {
-          const t = Date.now() / 1000 * obs.speed + obs.phase;
-          const pingPong = Math.sin(t);
-          currentObsX = obs.x + pingPong * ((obs.maxX - obs.minX) / 2);
-        }
+        const currentObsX = obstacleXAt(obs, time - (subSteps - 1 - s) * subDt);
 
         const halfW = obs.width / 2;
         const halfH = obs.height / 2;
@@ -311,9 +269,10 @@ export function stepBallPhysics(
       }
       if (!ball.alive) break;
     }
+    if (!ball.alive) break;
 
     // 5. Fall into void detection
-    if (ball.y < FALL_KILL_Y) {
+    if (ball.y < downhillHeight(ball.z) - FALL_DEPTH) {
       fellInVoid = true;
       ball.alive = false;
       ball.causeOfDeath = 'fall';
@@ -328,23 +287,4 @@ export function stepBallPhysics(
     hitObstacle,
     fellInVoid,
   };
-}
-
-/**
- * Computes ballistic distance reach for a jump over a gap
- */
-export function calculateJumpReach(
-  forwardSpeed: number,
-  verticalSpeed: number,
-  dropHeight: number
-): number {
-  // y(t) = y0 + vy * t - 0.5 * g * t^2 = y0 - dropHeight
-  // 0.5 * g * t^2 - vy * t - dropHeight = 0
-  const a = 0.5 * GRAVITY;
-  const b = -verticalSpeed;
-  const c = -dropHeight;
-  const discriminant = b * b - 4 * a * c;
-  if (discriminant < 0) return 0;
-  const flightTime = (-b + Math.sqrt(discriminant)) / (2 * a);
-  return forwardSpeed * flightTime;
 }

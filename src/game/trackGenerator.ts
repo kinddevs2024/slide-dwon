@@ -1,10 +1,9 @@
 import { TrackSegment, ObstacleData, BoosterData, GameMode } from './types';
-import { NORMAL_PHYSICS, HARD_PHYSICS, calculateJumpReach } from './physics';
+import { NORMAL_PHYSICS, HARD_PHYSICS, downhillHeight, DOWNHILL_GRADE, PLATFORM_HEIGHT } from './physics';
 
 export interface GeneratorState {
   nextZ: number;
   currentX: number;
-  currentY: number;
   segmentIndex: number;
   mode: GameMode;
   seed: number;
@@ -14,7 +13,6 @@ export function createInitialGeneratorState(mode: GameMode, seed = Date.now()): 
   return {
     nextZ: 0,
     currentX: 0,
-    currentY: 0,
     segmentIndex: 0,
     mode,
     seed,
@@ -38,16 +36,18 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   // Safe starting stretch (first 70 meters)
   if (distance < 70) {
     const length = 40;
+    const behindStart = distance === 0 ? 10 : 0;
     const width = isHard ? 10 : 12;
     const seg: TrackSegment = {
       id: segmentId,
       type: 'straight',
       x: state.currentX,
-      y: state.currentY,
-      z: state.nextZ + length / 2,
+      y: downhillHeight(state.nextZ - behindStart),
+      grade: DOWNHILL_GRADE,
+      z: state.nextZ + (length - behindStart) / 2,
       width,
-      length,
-      height: 1.2,
+      length: length + behindStart,
+      height: PLATFORM_HEIGHT,
       obstacles: [],
       boosters: [],
     };
@@ -57,7 +57,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
       seg.boosters.push({
         id: `boost_start`,
         x: 0,
-        y: state.currentY + 0.6,
+        y: downhillHeight(35) + PLATFORM_HEIGHT / 2,
         z: 35,
         width: 3.5,
         depth: 6,
@@ -70,11 +70,6 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   }
 
   // Segment types selection based on distance & mode
-  const currentSpeed = Math.min(
-    phys.maxSpeed,
-    phys.baseSpeed + (distance / 100) * phys.speedRampRate
-  );
-
   // Available segment archetypes
   const r = rand();
   let segType: TrackSegment['type'] = 'straight';
@@ -99,7 +94,6 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   const obstacles: ObstacleData[] = [];
   const boosters: BoosterData[] = [];
   let hasRamp = false;
-  let rampAngle = 0;
   let hasTunnel = false;
 
   // Handle segment archetype construction
@@ -120,18 +114,16 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
   } else if (segType === 'ramp') {
     // Ramp launches ball over an upcoming gap!
     hasRamp = true;
-    rampAngle = 0.16 + rand() * 0.08; // ~9 to 14 degrees
     segLength = 28;
     // Put a booster on the ramp for thrilling speed
     boosters.push({
       id: `ramp_boost_${state.segmentIndex}`,
       x: state.currentX,
-      y: state.currentY + 0.6,
+      y: downhillHeight(state.nextZ + segLength / 2) + 0.6,
       z: state.nextZ + segLength / 2,
       width: segWidth * 0.6,
       depth: 6,
       boostFactor: 1.35,
-      jumpImpulse: 7.5,
     });
   } else if (segType === 'tunnel') {
     hasTunnel = true;
@@ -154,7 +146,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
         id: `obs_${state.segmentIndex}`,
         type: 'block',
         x: obsX,
-        y: state.currentY + 1.6,
+        y: downhillHeight(state.nextZ + segLength / 2) + 1.6,
         z: state.nextZ + segLength * 0.5,
         width: obsWidth,
         height: 2.4,
@@ -169,7 +161,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
         id: `obs_pillar_${state.segmentIndex}`,
         type: 'pillar',
         x: state.currentX,
-        y: state.currentY + 1.8,
+        y: downhillHeight(state.nextZ + segLength / 2) + 1.8,
         z: state.nextZ + segLength * 0.5,
         width: pillarWidth,
         height: 2.6,
@@ -186,7 +178,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
           id: `obs_moving_${state.segmentIndex}`,
           type: 'moving_horizontal',
           x: state.currentX,
-          y: state.currentY + 1.5,
+          y: downhillHeight(state.nextZ + segLength / 2) + 1.5,
           z: state.nextZ + segLength * 0.5,
           width: 2.0,
           height: 2.0,
@@ -202,7 +194,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
           id: `obs_pillar_early_${state.segmentIndex}`,
           type: 'pillar',
           x: state.currentX,
-          y: state.currentY + 1.8,
+          y: downhillHeight(state.nextZ + segLength / 2) + 1.8,
           z: state.nextZ + segLength * 0.5,
           width: 1.8,
           height: 2.4,
@@ -219,7 +211,7 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
     boosters.push({
       id: `boost_${state.segmentIndex}`,
       x: state.currentX,
-      y: state.currentY + 0.6,
+      y: downhillHeight(state.nextZ + segLength / 2) + 0.6,
       z: state.nextZ + segLength * 0.5,
       width: Math.min(4.0, segWidth * 0.5),
       depth: 6.0,
@@ -232,13 +224,13 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
     id: segmentId,
     type: segType,
     x: state.currentX,
-    y: state.currentY,
+    y: downhillHeight(state.nextZ),
     z: state.nextZ + segLength / 2,
     width: segWidth,
     length: segLength,
-    height: 1.2,
+    height: PLATFORM_HEIGHT,
     hasRamp,
-    rampAngle: hasRamp ? rampAngle : undefined,
+    grade: DOWNHILL_GRADE,
     obstacles,
     boosters,
     hasTunnel,
@@ -249,13 +241,9 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
 
   // If this was a ramp, follow it with a gap and safe landing platform
   if (hasRamp) {
-    // Calculate guaranteed reachable gap length
-    const launchSpeed = currentSpeed * 1.35;
-    const launchVy = 7.5;
-    const rampRise = Math.tan(rampAngle) * segLength;
-    const maxJumpReach = calculateJumpReach(launchSpeed, launchVy, rampRise);
-    // Fair, guaranteed gap length well within reach
-    const gapLength = Math.max(14, Math.min(22, maxJumpReach * 0.55));
+    // The lip reduces downward velocity by 5.5 m/s relative to the deck.
+    // Leave a margin inside the resulting flight even at the initial speed.
+    const gapLength = phys.baseSpeed * 0.22;
 
     // Next platform starts after the gap
     state.nextZ += gapLength;
@@ -264,14 +252,15 @@ export function generateNextSegments(state: GeneratorState): TrackSegment[] {
     const landingLength = 55;
     const landingWidth = Math.max(segWidth * 1.35, 14);
     const landingSeg: TrackSegment = {
+      grade: DOWNHILL_GRADE,
       id: `seg_landing_${state.segmentIndex++}`,
       type: 'straight',
       x: state.currentX,
-      y: state.currentY,
+      y: downhillHeight(state.nextZ),
       z: state.nextZ + landingLength / 2,
       width: landingWidth,
       length: landingLength,
-      height: 2.0, // Thicker platform so swept collision never misses
+      height: PLATFORM_HEIGHT,
       obstacles: [],
       boosters: [],
     };
@@ -291,10 +280,12 @@ export function populateTrack(
   playerZ: number,
   lookaheadDistance = 260
 ): TrackSegment[] {
-  let updated = [...segments];
-
-  // 1. Remove old segments that are far behind player
-  updated = updated.filter((seg) => seg.z + seg.length / 2 > playerZ - 45);
+  const oldest = segments[0];
+  const cutoff = playerZ - 45;
+  if (oldest && oldest.z + oldest.length / 2 > cutoff && state.nextZ >= playerZ + lookaheadDistance) {
+    return segments;
+  }
+  const updated = segments.filter(seg => seg.z + seg.length / 2 > cutoff);
 
   // 2. Generate new segments while track extent is less than playerZ + lookaheadDistance
   while (state.nextZ < playerZ + lookaheadDistance) {
